@@ -1,0 +1,81 @@
+name: Nod image registry
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/registry.yml', 'scripts/registry.sh']
+permissions:
+  contents: read
+concurrency:
+  group: nod-registry
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - id: source
+        name: Resolve official default branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git ls-remote https://github.com/n8n-io/nod.git HEAD | cut -f1)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit: $sha" >> "$GITHUB_STEP_SUMMARY"
+  build:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [server, browser, workspace]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build missing immutable architecture image
+        env:
+          UPSTREAM_SHA: ${{ needs.source.outputs.sha }}
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+        run: bash scripts/registry.sh build
+  publish:
+    needs: [source, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble all immutable manifests, then promote latest
+        env:
+          UPSTREAM_SHA: ${{ needs.source.outputs.sha }}
+        run: bash scripts/registry.sh publish
